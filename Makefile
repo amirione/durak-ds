@@ -1,4 +1,4 @@
-# Durak DS - Makefile (devkitARM + libnds + calico)
+# Durak DS - Makefile (devkitARM + libnds 2.x + calico)
 .RECIPEPREFIX := >
 
 ifeq ($(strip $(DEVKITARM)),)
@@ -14,17 +14,17 @@ TARGET := durak
 SRC    := main.c
 
 ARCH    := -march=armv5te -mtune=arm946e-s
-INCLUDE := -I$(LIBNDS)/include $(if $(wildcard $(CALICO)/include),-I$(CALICO)/include,)
-CFLAGS  := -Wall -O2 $(ARCH) -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -D__NDS__ -D__ARM9__ -DARM9 $(INCLUDE)
-LDFLAGS := -specs=ds_arm9.specs -g $(ARCH) -mthumb -mthumb-interwork -L$(LIBNDS)/lib $(if $(wildcard $(CALICO)/lib),-L$(CALICO)/lib,)
-LIBS    := -lnds9 $(if $(wildcard $(CALICO)/lib/libcalico_ds9.a),-lcalico_ds9,)
+INCLUDE := -I$(LIBNDS)/include -I$(CALICO)/include
+CFLAGS  := -Wall -O2 -g $(ARCH) -ffunction-sections -fdata-sections -DARM9 $(INCLUDE)
+LDFLAGS := -specs=$(CALICO)/share/ds9.specs -g $(ARCH) -L$(LIBNDS)/lib
+LIBS    := -lnds9
 
+ARM7   := $(CALICO)/bin/ds7_maine.elf
 BANNER := $(if $(wildcard $(LIBNDS)/icon.bmp),-b $(LIBNDS)/icon.bmp "Durak DS;Swiss minimalism card game;",)
 
 # diagnostics (shown at the top of the Build log)
-$(info CALICO header: $(wildcard $(CALICO)/include/calico.h))
-$(info CALICO libs: $(wildcard $(CALICO)/lib/*.a))
-$(info LIBNDS libs: $(wildcard $(LIBNDS)/lib/*.a))
+$(info CALICO share: $(wildcard $(CALICO)/share/*))
+$(info CALICO bin: $(wildcard $(CALICO)/bin/*))
 
 .PHONY: all clean
 
@@ -34,7 +34,7 @@ $(TARGET).elf: $(SRC)
 > $(CC) $(CFLAGS) $(SRC) $(LDFLAGS) $(LIBS) -o $@
 
 $(TARGET).nds: $(TARGET).elf
-> ndstool -c $@ -9 $< $(BANNER)
+> ndstool -c $@ -9 $< $(if $(wildcard $(ARM7)),-7 $(ARM7),) $(BANNER)
 
 clean:
 > rm -f $(TARGET).elf $(TARGET).nds
