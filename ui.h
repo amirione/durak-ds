@@ -205,6 +205,7 @@ typedef struct {
     int scr, mode, bots; bool cheat;
     Game g;
     int hover, botTimer, skipKey;
+    int hoverLift;                 // animated lift of the currently selected card, 0..HAND_LIFT
     bool dirty;
     int lastX, lastY;
 } UI;
@@ -353,6 +354,21 @@ static void ui_update(UI *u, int touch, int x, int y, bool startPressed, uint32_
         if (h != ID_NONE && h == was) ui_activate(u, h, seed);
     }
     if (startPressed && u->scr == UI_GAME) { u->scr = UI_MODE; u->hover = ID_NONE; u->dirty = true; }
+
+    // Animate the selected card independently of game logic. Two pixels per
+    // frame gives a short, smooth ~100 ms lift/drop at 60 Hz.
+    {
+        int targetLift = (u->scr == UI_GAME && u->hover >= 0 && u->hover < u->g.handN[0]) ? HAND_LIFT : 0;
+        if (u->hoverLift < targetLift) {
+            u->hoverLift += 2;
+            if (u->hoverLift > targetLift) u->hoverLift = targetLift;
+            u->dirty = true;
+        } else if (u->hoverLift > targetLift) {
+            u->hoverLift -= 2;
+            if (u->hoverLift < targetLift) u->hoverLift = targetLift;
+            u->dirty = true;
+        }
+    }
 
     if (u->scr == UI_GAME) {
         Game *g = &u->g;
@@ -536,7 +552,7 @@ static void render_game_bottom(const UI *u, uint16_t *fb) {
     }
     if (u->hover >= 0 && u->hover < n) {
         int x, st; hand_geometry(n, u->hover, &x, &st);
-        draw_card(fb, x, HAND_Y - HAND_LIFT, HAND_CW, HAND_CH, g->hands[0][u->hover], true, CF_INDEX | CF_BOTTOM);
+        draw_card(fb, x, HAND_Y - u->hoverLift, HAND_CW, HAND_CH, g->hands[0][u->hover], true, CF_INDEX | CF_BOTTOM);
     }
 
     if (ui_throw_window(u)) {
