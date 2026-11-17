@@ -15,10 +15,14 @@ jobs:
     container: devkitpro/devkitarm:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install libnds
+      - name: Check libnds
         run: |
+          if [ -f "$DEVKITPRO/libnds/lib/libnds9.a" ]; then
+            echo "libnds already in image"
+            exit 0
+          fi
           ok=0
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3; do
             if dkp-pacman -Sy --noconfirm nds-dev; then ok=1; break; fi
             echo "attempt $i failed, waiting"
             sleep $((i * 20))
