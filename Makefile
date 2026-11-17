@@ -1,36 +1,36 @@
-# Durak DS - Makefile (devkitARM + libnds 2.x + calico)
-.RECIPEPREFIX := >
-
+# Durak DS - Makefile on official devkitPro rules (ds_rules)
 ifeq ($(strip $(DEVKITARM)),)
 $(error "DEVKITARM is not set")
 endif
 
-include $(DEVKITARM)/base_tools
+# ds_rules reads LIBPATHS while it is included, so define it first
+LIBPATHS := -L$(DEVKITPRO)/libnds/lib
 
-LIBNDS ?= $(DEVKITPRO)/libnds
-CALICO ?= $(DEVKITPRO)/calico
+include $(DEVKITARM)/ds_rules
 
-TARGET := durak
-SRC    := main.c
+# ds_rules uses tab recipes, so switch the prefix only after the include
+.RECIPEPREFIX := >
 
-ARCH    := -march=armv5te -mtune=arm946e-s
-INCLUDE := -I$(LIBNDS)/include -I$(CALICO)/include
-CFLAGS  := -Wall -O2 -g $(ARCH) -ffunction-sections -fdata-sections -D__NDS__ -D__ARM9__ -DARM9 $(INCLUDE)
-LDFLAGS := -specs=$(CALICO)/share/ds9.specs -g $(ARCH) -L$(CALICO)/lib -L$(CALICO)/share -L$(LIBNDS)/lib
-LIBS    := -lnds9 -lcalico_ds9
+TARGET         := durak
+GAME_TITLE     := Durak DS
+GAME_SUBTITLE1 := Swiss minimalism card game
 
-ARM7   := $(CALICO)/bin/ds7_maine.elf
-BANNER := $(if $(wildcard $(LIBNDS)/icon.bmp),-b $(LIBNDS)/icon.bmp "Durak DS;Swiss minimalism card game;",)
+ARCH     := -march=armv5te -mtune=arm946e-s
+INCLUDE  := -I$(LIBNDS)/include
+CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections $(ARCH) $(INCLUDE) -DARM9
+LDFLAGS   = -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LIBS     := -lnds9
+
+export LD := $(CC)
+OFILES   := main.o
+OUTPUT   := $(CURDIR)/$(TARGET)
+export DEPSDIR := $(CURDIR)
 
 .PHONY: all clean
+all: $(OUTPUT).nds
 
-all: $(TARGET).nds
-
-$(TARGET).elf: $(SRC)
-> $(CC) $(CFLAGS) $(SRC) $(LDFLAGS) $(LIBS) -o $@
-
-$(TARGET).nds: $(TARGET).elf
-> ndstool -c $@ -9 $< $(if $(wildcard $(ARM7)),-7 $(ARM7),) $(BANNER)
+$(OUTPUT).nds: $(OUTPUT).elf
+$(OUTPUT).elf: $(OFILES)
 
 clean:
-> rm -f $(TARGET).elf $(TARGET).nds
+> rm -f $(OFILES) $(OUTPUT).elf $(OUTPUT).nds $(TARGET).map $(TARGET).lst main.d
