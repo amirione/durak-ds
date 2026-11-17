@@ -16,11 +16,14 @@ SRC    := main.c
 ARCH    := -march=armv5te -mtune=arm946e-s
 INCLUDE := -I$(LIBNDS)/include -I$(CALICO)/include
 CFLAGS  := -Wall -O2 -g $(ARCH) -ffunction-sections -fdata-sections -D__NDS__ -D__ARM9__ -DARM9 $(INCLUDE)
-LDFLAGS := -specs=$(CALICO)/share/ds9.specs -g $(ARCH) -L$(LIBNDS)/lib
+LDFLAGS := -specs=$(CALICO)/share/ds9.specs -g $(ARCH) -L$(CALICO)/lib -L$(CALICO)/share -L$(LIBNDS)/lib
 LIBS    := -lnds9
 
 ARM7   := $(CALICO)/bin/ds7_maine.elf
 BANNER := $(if $(wildcard $(LIBNDS)/icon.bmp),-b $(LIBNDS)/icon.bmp "Durak DS;Swiss minimalism card game;",)
+
+# diagnostics
+$(info ds9.ld found at: $(shell find $(DEVKITPRO) -name 'ds9.ld' 2>/dev/null))
 
 .PHONY: all clean
 
