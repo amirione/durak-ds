@@ -25,15 +25,19 @@
 
 /* ------------------------------------------------------------ primitives */
 
+// Drawing is clipped at this column. The hand fan sets it so that a card only paints the strip the next card
+// does not cover (without it, 20 cards write ~4x the pixels of the whole screen).
+static int clip_x1 = SCR_W;
+
 static inline void px_put(uint16_t *fb, int x, int y, uint16_t c) {
-    if ((unsigned)x < SCR_W && (unsigned)y < SCR_H) fb[y * SCR_W + x] = c;
+    if ((unsigned)x < (unsigned)clip_x1 && (unsigned)y < SCR_H) fb[y * SCR_W + x] = c;
 }
 
 static void fill_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
     int x1 = x + w, y1 = y + h;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    if (x1 > SCR_W) x1 = SCR_W;
+    if (x1 > clip_x1) x1 = clip_x1;
     if (y1 > SCR_H) y1 = SCR_H;
     for (int j = y; j < y1; j++) {
         uint16_t *row = fb + j * SCR_W;
@@ -158,7 +162,7 @@ static int text_wrap_center(uint16_t *fb, const Font *f, int cx, int capMidY, in
 
 static const char *RANK_STR[9] = { "6", "7", "8", "9", "10", "J", "Q", "K", "A" };
 static const char *SUIT_WORD[4] = { "пики", "черви", "бубны", "трефы" };
-static const int SUIT_PX[4] = { 8, 11, 14, 18 };
+static const int SUIT_PX[5] = { 8, 11, 14, 18, 24 };
 
 static void draw_suit(uint16_t *fb, int sz, int suit, int cx, int cy, uint16_t col) {
     const uint32_t *rows;
@@ -166,7 +170,8 @@ static void draw_suit(uint16_t *fb, int sz, int suit, int cx, int cy, uint16_t c
         case 0: rows = SUIT_8[suit]; break;
         case 1: rows = SUIT_11[suit]; break;
         case 2: rows = SUIT_14[suit]; break;
-        default: rows = SUIT_18[suit]; break;
+        case 3: rows = SUIT_18[suit]; break;
+        default: rows = SUIT_24[suit]; break;
     }
     int n = SUIT_PX[sz], x0 = cx - n / 2, y0 = cy - n / 2;
     for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) if ((rows[y] >> x) & 1) px_put(fb, x0 + x, y0 + y, col);
@@ -205,10 +210,12 @@ typedef struct {
     int scr, mode, bots; bool cheat;
     Game g;
     int hover, botTimer, skipKey;
-    int hoverLift;                 // animated lift of the currently selected card, 0..HAND_LIFT
-    bool dirty;
+    bool dirtyTop, dirtyBot;       // each screen is redrawn only when its own content changed
     int lastX, lastY;
+    int stickyTimer, lastCaught;   // keeps the "caught cheating" message on screen for ~3 s
 } UI;
+
+#define UI_MARK_ALL(u) do { (u)->dirtyTop = true; (u)->dirtyBot = true; } while (0)
 
 #define HAND_CW 50
 #define HAND_CH 70
@@ -217,12 +224,12 @@ typedef struct {
 
 static void ui_init(UI *u) {
     memset(u, 0, sizeof *u);
-    u->scr = UI_MODE; u->hover = ID_NONE; u->skipKey = -1; u->dirty = true;
+    u->scr = UI_MODE; u->hover = ID_NONE; u->skipKey = -1; UI_MARK_ALL(u);
 }
 
 static void ui_start_game(UI *u, uint32_t seed) {
     g_init(&u->g, u->mode, u->bots, u->cheat, seed);
-    u->scr = UI_GAME; u->hover = ID_NONE; u->botTimer = 0; u->skipKey = -1; u->dirty = true;
+    u->scr = UI_GAME; u->hover = ID_NONE; u->botTimer = 0; u->skipKey = -1; u->stickyTimer = 0; u->lastCaught = 0; UI_MARK_ALL(u);
 }
 
 static int ui_min_bots(const UI *u) { return u->mode == GM_PEREVODNOY ? 2 : 1; }
@@ -322,7 +329,7 @@ static void ui_play_card(UI *u, int idx) {
 }
 
 static void ui_activate(UI *u, int id, uint32_t seed) {
-    u->dirty = true;
+    UI_MARK_ALL(u);
     if (id >= 0 && id < 100) { ui_play_card(u, id); u->botTimer = 0; return; }
     switch (id) {
         case ID_PASS: g_pass(&u->g, 0); u->botTimer = 0; break;
@@ -346,35 +353,23 @@ static void ui_update(UI *u, int touch, int x, int y, bool startPressed, uint32_
     if (touch == 1 || touch == 2) {
         u->lastX = x; u->lastY = y;
         int h = ui_hit(u, x, y);
-        if (h != u->hover) { u->hover = h; u->dirty = true; }
+        if (h != u->hover) { u->hover = h; u->dirtyBot = true; }        // hover only changes the touch screen
     } else if (touch == 3) {
         int h = ui_hit(u, u->lastX, u->lastY);
         int was = u->hover;
-        u->hover = ID_NONE; u->dirty = true;
+        u->hover = ID_NONE; u->dirtyBot = true;
         if (h != ID_NONE && h == was) ui_activate(u, h, seed);
     }
-    if (startPressed && u->scr == UI_GAME) { u->scr = UI_MODE; u->hover = ID_NONE; u->dirty = true; }
-
-    // Animate the selected card independently of game logic. Two pixels per
-    // frame gives a short, smooth ~100 ms lift/drop at 60 Hz.
-    {
-        int targetLift = (u->scr == UI_GAME && u->hover >= 0 && u->hover < u->g.handN[0]) ? HAND_LIFT : 0;
-        if (u->hoverLift < targetLift) {
-            u->hoverLift += 2;
-            if (u->hoverLift > targetLift) u->hoverLift = targetLift;
-            u->dirty = true;
-        } else if (u->hoverLift > targetLift) {
-            u->hoverLift -= 2;
-            if (u->hoverLift < targetLift) u->hoverLift = targetLift;
-            u->dirty = true;
-        }
-    }
+    if (startPressed && u->scr == UI_GAME) { u->scr = UI_MODE; u->hover = ID_NONE; UI_MARK_ALL(u); }
 
     if (u->scr == UI_GAME) {
         Game *g = &u->g;
+        if (!g_state_ok(g)) { g_repair(g); UI_MARK_ALL(u); }              // safety net, never expected to run
+        if (g->stat_caught != u->lastCaught) { u->lastCaught = g->stat_caught; u->stickyTimer = 180; UI_MARK_ALL(u); }
+        if (u->stickyTimer > 0 && --u->stickyTimer == 0) UI_MARK_ALL(u);
         bool botActs = g->over == GO_NONE && (g->active != 0 || g->autoHuman) && !ui_throw_window(u);
         if (botActs) {
-            if (++u->botTimer >= BOT_DELAY_FRAMES) { g_bot_step(g); u->botTimer = 0; u->dirty = true; }
+            if (++u->botTimer >= BOT_DELAY_FRAMES) { g_bot_step(g); u->botTimer = 0; UI_MARK_ALL(u); }
         } else u->botTimer = 0;
     }
 }
@@ -383,18 +378,14 @@ static void ui_update(UI *u, int touch, int x, int y, bool startPressed, uint32_
 
 static const char *mode_name(int m) { return m == GM_PODKIDNOY ? "подкидной" : m == GM_PEREVODNOY ? "переводной" : "обычный"; }
 
-static void draw_choice(uint16_t *fb, int x, int y, int w, int h, bool hov, bool accent, int icon,
+static void draw_choice(uint16_t *fb, int x, int y, int w, int h, bool hov, bool accent, int suit,
                         const char *label, const Font *lf, const char *desc) {
     uint16_t bg = hov ? (accent ? C_ACCENT : C_INK) : C_PAPER;
     uint16_t fg = hov ? C_PAPER : C_INK;
     fill_rect(fb, x, y, w, h, bg);
     int cx = x + w / 2, cy = y + h / 2 - 8 - (hov ? 4 : 0);
     frame_rect(fb, cx - 19, cy - 26, 38, 52, 2, fg);
-    if (icon == 0) {
-        for (int j = -6; j <= 6; j++) for (int i = -6; i <= 6; i++) if (i * i + j * j <= 36) px_put(fb, cx + i, cy + j, fg);
-    } else {
-        for (int j = -7; j <= 7; j++) for (int i = -7; i <= 7; i++) if (i < 0 ? -i + (j < 0 ? -j : j) <= 7 : i + (j < 0 ? -j : j) <= 7) px_put(fb, cx + i, cy + j, fg);
-    }
+    draw_suit(fb, 4, suit, cx, cy, hov ? C_PAPER : suit_color(suit));
     text_center(fb, lf, cx, y + h / 2 + 36, label, fg, 0);
     if (desc) text_wrap_center(fb, &F9, cx, y + h / 2 + 52, w - 10, desc, hov ? C_PAPER : C_GREY, 12);
 }
@@ -411,9 +402,9 @@ static void render_mode_top(uint16_t *fb) {
 static void render_mode_bottom(const UI *u, uint16_t *fb) {
     fill_rect(fb, 0, 0, SCR_W, SCR_H, C_PAPER);
     text_left(fb, &F9, 6, 6, "РЕЖИМ ИГРЫ", C_INK, 1);
-    draw_choice(fb, 0,   18, 85, 170, u->hover == ID_MODE0,     false, 0, "ОБЫЧНЫЙ",    &F9, "Без подкидки");
-    draw_choice(fb, 85,  18, 86, 170, u->hover == ID_MODE0 + 1, true,  1, "ПОДКИДНОЙ",  &F9, "Можно подкидывать карты");
-    draw_choice(fb, 171, 18, 85, 170, u->hover == ID_MODE0 + 2, false, 0, "ПЕРЕВОДНОЙ", &F9, "Перевод хода (нужно ≥2 бота)");
+    draw_choice(fb, 0,   18, 85, 170, u->hover == ID_MODE0,     false, SUIT_SPADES, "ОБЫЧНЫЙ",    &F9, "Без подкидки");
+    draw_choice(fb, 85,  18, 86, 170, u->hover == ID_MODE0 + 1, true,  SUIT_DIAMONDS, "ПОДКИДНОЙ",  &F9, "Можно подкидывать карты");
+    draw_choice(fb, 171, 18, 85, 170, u->hover == ID_MODE0 + 2, false, SUIT_CLUBS, "ПЕРЕВОДНОЙ", &F9, "Перевод хода (нужно ≥2 бота)");
     fill_rect(fb, 85, 18, 1, 170, C_LINE);
     fill_rect(fb, 171, 18, 1, 170, C_LINE);
     frame_rect(fb, 0, 0, SCR_W, SCR_H, 1, C_INK);
@@ -439,7 +430,7 @@ static void render_bots_bottom(const UI *u, uint16_t *fb) {
         lab[0] = (char)('0' + n); lab[1] = 0;
         strcpy(desc, n == 1 ? "1 противник" : "2 противника");
         if (n == 3) strcpy(desc, "3 противника");
-        draw_choice(fb, x0, 18, w, 128, u->hover == ID_BOTS1 + n - 1, n == 3, n == 3 ? 1 : 0, lab, &F12, desc);
+        draw_choice(fb, x0, 18, w, 128, u->hover == ID_BOTS1 + n - 1, n == 3, n == 1 ? SUIT_SPADES : n == 2 ? SUIT_CLUBS : SUIT_DIAMONDS, lab, &F12, desc);
         if (i > 0) fill_rect(fb, x0, 18, 1, 128, C_LINE);
     }
     bool hov = u->hover == ID_CHEAT;
@@ -477,6 +468,7 @@ static const char *ui_status(const UI *u, char *buf) {
     if (g->over == GO_DRAW) return "НИЧЬЯ";
     if (g->over == 0) return "ТЫ ПРОИГРАЛ";
     if (g->over > 0) return "ТЫ ВЫИГРАЛ";
+    if (u->stickyTimer > 0) return g->msg;
     if (g->active == 0 && g->defender == 0 && g->phase == PH_DEFEND && g->mode == GM_PEREVODNOY && ui_can_transfer_any(u))
         return "Бей или переведи карту того же ранга";
     if (ui_throw_window(u)) return "Можешь подкинуть карту";
@@ -494,28 +486,34 @@ static void render_game_top(const UI *u, uint16_t *fb) {
     { int d = g->deckN; char num[4]; int l = 0; if (d >= 10) num[l++] = (char)('0' + d / 10); num[l++] = (char)('0' + d % 10); num[l] = 0; strcat(tmp, num); }
     text_right(fb, &F9, 250, 6, tmp, C_INK, 1);
 
-    strcpy(tmp, mode_name(g->mode));
-    strcat(tmp, " · ");
-    { char nb[2] = { (char)('0' + (g->nPlayers - 1)), 0 }; strcat(tmp, nb); strcat(tmp, g->nPlayers - 1 == 1 ? " бот" : " бота"); }
-    if (g->cheating) strcat(tmp, " · жульничество");
-    text_left(fb, &F9, 6, 19, tmp, C_GREY, 0);
-    { char bb[48]; bb[0] = 0;
-      for (int p = 1; p < g->nPlayers; p++) {
-          char one[16]; int l = 0;
-          one[l++] = (char)0xD0; one[l++] = (char)0x91;            // UTF-8 for Б
-          one[l++] = (char)('0' + p); one[l++] = ':';
-          if (g->handN[p] >= 10) one[l++] = (char)('0' + g->handN[p] / 10);
-          one[l++] = (char)('0' + g->handN[p] % 10); one[l] = 0;
-          if (p > 1) strcat(bb, "  ");
-          strcat(bb, one);
-      }
-      text_right(fb, &F9, 250, 19, bb, C_INK, 0); }
+    char bb[48]; bb[0] = 0;                                   // bot hand sizes, e.g. "Б1:6  Б2:5"
+    for (int p = 1; p < g->nPlayers; p++) {
+        char one[16]; int l = 0;
+        one[l++] = (char)0xD0; one[l++] = (char)0x91;            // UTF-8 for Б
+        one[l++] = (char)('0' + p); one[l++] = ':';
+        if (g->handN[p] >= 10) one[l++] = (char)('0' + g->handN[p] / 10);
+        one[l++] = (char)('0' + g->handN[p] % 10); one[l] = 0;
+        if (p > 1) strcat(bb, "  ");
+        strcat(bb, one);
+    }
+    text_right(fb, &F9, 250, 19, bb, C_INK, 0);
+    {   // left label: the longest variant that still fits beside the counters
+        char lf[96], nb[2] = { (char)('0' + (g->nPlayers - 1)), 0 };
+        int budget = 244 - text_width(&F9, bb, 0) - 8;
+        strcpy(lf, mode_name(g->mode)); strcat(lf, " · "); strcat(lf, nb);
+        strcat(lf, g->nPlayers - 1 == 1 ? " бот" : " бота");
+        if (g->cheating) strcat(lf, " · жульничество");
+        if (text_width(&F9, lf, 0) > budget) { strcpy(lf, mode_name(g->mode)); if (g->cheating) strcat(lf, " · жульничество"); }
+        if (text_width(&F9, lf, 0) > budget) { strcpy(lf, mode_name(g->mode)); if (g->cheating) strcat(lf, " · жульн."); }
+        if (text_width(&F9, lf, 0) > budget) strcpy(lf, mode_name(g->mode));
+        text_left(fb, &F9, 6, 19, lf, C_GREY, 0);
+    }
 
     for (int i = 0; i < g->tableN; i++) {
         int x, y, w, h, dx, dy;
         table_slot(g->tableN, i, &x, &y, &w, &h, &dx, &dy);
-        draw_card(fb, x, y, w, h, g->table[i].attack, false, CF_BOTTOM);
-        if (g->table[i].hasDefend) draw_card(fb, x + dx, y + dy, w, h, g->table[i].defend, false, CF_BOTTOM);
+        draw_card(fb, x, y, w, h, g->table[i].attack, false, CF_BOTTOM | CF_INDEX);
+        if (g->table[i].hasDefend) draw_card(fb, x + dx, y + dy, w, h, g->table[i].defend, false, CF_BOTTOM | CF_INDEX);
     }
 
     // trump badge in the corner (rank hidden once the deck is gone)
@@ -548,11 +546,14 @@ static void render_game_bottom(const UI *u, uint16_t *fb) {
     for (int i = 0; i < n; i++) {                       // fan, left to right; the touched card is drawn last
         if (i == u->hover) continue;
         int x, st; hand_geometry(n, i, &x, &st);
+        // the right part is hidden by the next card, unless that card is the lifted one (then it is drawn later, higher up)
+        if (i < n - 1 && i + 1 != u->hover) clip_x1 = x + st;
         draw_card(fb, x, HAND_Y, HAND_CW, HAND_CH, g->hands[0][i], false, CF_INDEX | (i == n - 1 ? CF_BOTTOM : 0));
+        clip_x1 = SCR_W;
     }
     if (u->hover >= 0 && u->hover < n) {
         int x, st; hand_geometry(n, u->hover, &x, &st);
-        draw_card(fb, x, HAND_Y - u->hoverLift, HAND_CW, HAND_CH, g->hands[0][u->hover], true, CF_INDEX | CF_BOTTOM);
+        draw_card(fb, x, HAND_Y - HAND_LIFT, HAND_CW, HAND_CH, g->hands[0][u->hover], true, CF_INDEX | CF_BOTTOM);
     }
 
     if (ui_throw_window(u)) {
@@ -574,13 +575,20 @@ static void render_game_bottom(const UI *u, uint16_t *fb) {
     frame_rect(fb, 0, 0, SCR_W, SCR_H, 1, C_INK);
 }
 
-// top = upper screen, bot = lower (touch) screen
+// top = upper screen, bot = lower (touch) screen. Only the screen whose content changed is redrawn.
 static void ui_render(UI *u, uint16_t *top, uint16_t *bot) {
-    if (!u->dirty) return;
-    if (u->scr == UI_MODE)      { render_mode_top(top);      render_mode_bottom(u, bot); }
-    else if (u->scr == UI_BOTS) { render_bots_top(u, top);   render_bots_bottom(u, bot); }
-    else                        { render_game_top(u, top);   render_game_bottom(u, bot); }
-    u->dirty = false;
+    if (!u->dirtyTop && !u->dirtyBot) return;
+    if (u->scr == UI_MODE) {
+        if (u->dirtyTop) render_mode_top(top);
+        if (u->dirtyBot) render_mode_bottom(u, bot);
+    } else if (u->scr == UI_BOTS) {
+        if (u->dirtyTop) render_bots_top(u, top);
+        if (u->dirtyBot) render_bots_bottom(u, bot);
+    } else {
+        if (u->dirtyTop) render_game_top(u, top);
+        if (u->dirtyBot) render_game_bottom(u, bot);
+    }
+    u->dirtyTop = u->dirtyBot = false;
 }
 
 #endif
