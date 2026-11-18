@@ -10,6 +10,15 @@ permissions:
   contents: write
 
 jobs:
+  # Host-side tests of the rules and the UI layer. Independent of the ROM build, so a red test
+  # does not stop you from getting a ROM, but you see it on the commit.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rules and UI tests
+        run: make -C tests test
+
   build:
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
