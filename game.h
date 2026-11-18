@@ -25,6 +25,7 @@ enum { DIFF_EASY, DIFF_MEDIUM, DIFF_HARD };
 #define G_STALL_LIMIT 12
 static const int CHEAT_CATCH_PCT[3] = { 20, 40, 65 };
 
+#define G_FIRST_BOUT_CAP 5   // the very first bout: at most 5 cards on the table
 #define G_MAX_PLAYERS 4
 #define G_MAX_HAND    36
 #define G_MAX_TABLE   6
@@ -50,6 +51,9 @@ typedef struct {
     uint8_t discarded[36];                      // public knowledge: cards that left the game (beaten pairs)
     int stall;                                  // consecutive bouts that ended with a take and no progress
     int stat_cheats, stat_caught, stat_repairs; // counters for tests and diagnostics
+    bool firstBout;                             // nothing has been beaten or taken yet: table cap is 5
+    int throwRoll;                              // table size at the last medium-bot throw-in decision (one roll per size)
+    int stat_throws, stat_throws_def;           // bot throw-ins in total / made while the defender was still to answer
 } Game;
 
 /* ------------------------------------------------------------- helpers */
@@ -146,9 +150,17 @@ static void g_init(Game *g, int mode, int bots, bool cheating, uint32_t seed) {
     g->trumpCard = g->deck[g->deckN - 1];
     g->trump = g->trumpCard.suit;
     for (int p = 0; p < g->nPlayers; p++) g_sort_hand(g, p);
-    g->attacker = 0; g->defender = 1; g->active = 0; g->phase = PH_ATTACK;
+    // first move: the holder of the lowest trump leads; with no trump in anybody's hand the seat is random
+    int first = -1, low = 99;
+    for (int p = 0; p < g->nPlayers; p++)
+        for (int i = 0; i < g->handN[p]; i++)
+            if (g->hands[p][i].suit == g->trump && g->hands[p][i].rank < low) { low = g->hands[p][i].rank; first = p; }
+    bool byTrump = first >= 0;
+    if (!byTrump) first = (int)(g_rand(g) % (uint32_t)g->nPlayers);
+    g->attacker = first; g->defender = (first + 1) % g->nPlayers; g->active = first; g->phase = PH_ATTACK;
+    g->firstBout = true; g->throwRoll = 0;
     g->over = GO_NONE;
-    g->msg = "Твой ход — выбери карту для атаки";
+    g->msg = first == 0 ? "Твой ход — выбери карту для атаки" : byTrump ? "Первым ходит бот: младший козырь" : "Первым ходит бот";
 }
 
 static void g_set_difficulty(Game *g, int d) {            // every bot seat; seat 0 only matters when autoHuman is on
@@ -179,8 +191,10 @@ static void g_check_over(Game *g) {
 
 /* ------------------------------------------------------- legality checks */
 
+static int g_table_cap(const Game *g) { return g->firstBout ? G_FIRST_BOUT_CAP : G_MAX_TABLE; }
+
 static bool g_defender_can_take_more(const Game *g) {   // attacks may not outnumber the defender's cards
-    return g->tableN < G_MAX_TABLE && g_undefended(g) < g->handN[g->defender];
+    return g->tableN < g_table_cap(g) && g_undefended(g) < g->handN[g->defender];
 }
 
 static bool g_rank_ok(const Game *g, DCard c) {          // the card matches a rank already on the table
@@ -226,7 +240,7 @@ static bool g_can_transfer_card(const Game *g, int p, DCard c) {
     if (c.rank != g->table[o].attack.rank) return false;
     int nd = g_next_active(g, p);
     if (nd == p || nd == g->attacker) return false;
-    return g->tableN < G_MAX_TABLE && g->handN[nd] >= g->tableN + 1;
+    return g->tableN < g_table_cap(g) && g->handN[nd] >= g->tableN + 1;
 }
 
 /* --------------------------------------------------------------- actions */
@@ -269,7 +283,7 @@ static bool g_attack(Game *g, int p, int ci) {
     if (!g_can_attack_card(g, c)) {
         if (g_cheat_allowed(g, p) && g->tableN > 0 && g_defender_can_take_more(g)) cheat = true;
         else {
-            g->msg = g->tableN >= G_MAX_TABLE || !g_defender_can_take_more(g) ? "Больше карт подкинуть нельзя"
+            g->msg = g->tableN >= g_table_cap(g) || !g_defender_can_take_more(g) ? "Больше карт подкинуть нельзя"
                                                                                : "Такого ранга нет на столе";
             return false;
         }
@@ -328,7 +342,7 @@ static bool g_take(Game *g, int p) {
         if (g->table[i].hasDefend) g->hands[p][g->handN[p]++] = g->table[i].defend;
     }
     int att = g->attacker, def = g->defender, deckBefore = g->deckN;
-    g->tableN = 0; g->cheatBan = false;
+    g->tableN = 0; g->cheatBan = false; g->firstBout = false; g->throwRoll = 0;
     g_refill(g, att, def);
     g->phase = PH_ATTACK;
     g->msg = p == 0 ? "Ты забрал карты. Ход переходит дальше." : "Бот забрал карты.";
@@ -350,7 +364,7 @@ static bool g_pass(Game *g, int p) {
         g->discarded[g->table[i].attack.suit * 9 + g->table[i].attack.rank] = 1;
         if (g->table[i].hasDefend) g->discarded[g->table[i].defend.suit * 9 + g->table[i].defend.rank] = 1;
     }
-    g->tableN = 0; g->cheatBan = false; g->stall = 0;
+    g->tableN = 0; g->cheatBan = false; g->stall = 0; g->firstBout = false; g->throwRoll = 0;
     g_refill(g, att, def);
     g->phase = PH_ATTACK;
     g->msg = "Бита.";
@@ -387,7 +401,7 @@ static void g_repair(Game *g) {
         if (g->handN[def] < G_MAX_HAND) g->hands[def][g->handN[def]++] = g->table[i].attack;
         if (g->table[i].hasDefend && g->handN[def] < G_MAX_HAND) g->hands[def][g->handN[def]++] = g->table[i].defend;
     }
-    g->tableN = 0; g->cheatBan = false; g->stall = 0; g->phase = PH_ATTACK;
+    g->tableN = 0; g->cheatBan = false; g->stall = 0; g->firstBout = false; g->throwRoll = 0; g->phase = PH_ATTACK;
     g_refill(g, 0, def == 0 ? 1 % g->nPlayers : def);
     g_check_over(g);
     if (g->over == GO_NONE) {
@@ -447,7 +461,45 @@ static bool g_bot_throw_in(Game *g) {              // podkidnoy: a bystander bot
         g_add_attack(g, p, ci);
         g->phase = PH_DEFEND; g->active = g->defender;
         g->msg = "Бот подкинул.";
+        g->stat_throws++;
         return true;
+    }
+    return false;
+}
+
+// Podkidnoy: while the defender is still answering, a bystander bot may add a card of a rank already on the table.
+// Only public information is used (the table and the bot's own hand). The attacker looks first, then the seats in order.
+// easy never does it, medium decides once per table size (a coin flip), hard always. Trumps are kept while the deck lasts.
+static bool g_bot_throw_during_defense(Game *g) {
+    if (g->mode != GM_PODKIDNOY || g->phase != PH_DEFEND || g->tableN == 0 || !g_defender_can_take_more(g)) return false;
+    for (int k = 0; k < g->nPlayers; k++) {
+        int p = (g->attacker + k) % g->nPlayers;
+        if (p == g->defender || g->handN[p] == 0) continue;
+        if (p == 0 && !g->autoHuman) continue;
+        if (g->diff[p] == DIFF_EASY) continue;
+        int ci = g_bot_pick(g, p, 0, -1);
+        if (ci < 0) continue;
+        if (g->hands[p][ci].suit == g->trump && g->deckN > 0) continue;
+        if (g->diff[p] == DIFF_MEDIUM) {
+            if (g->throwRoll == g->tableN) return false;       // already decided for this table size
+            g->throwRoll = g->tableN;
+            if (!(g_rand(g) & 1)) return false;
+        }
+        g_add_attack(g, p, ci);                                // phase and active stay: the defender still has to answer
+        g->msg = "Бот подкинул.";
+        g->stat_throws++; g->stat_throws_def++;
+        return true;
+    }
+    return false;
+}
+
+// true if a bot could throw in right now (lets the UI keep ticking while the human is the one defending)
+static bool g_bot_may_throw(const Game *g) {
+    if (g->mode != GM_PODKIDNOY || g->phase != PH_DEFEND || g->tableN == 0 || !g_defender_can_take_more(g)) return false;
+    for (int p = 0; p < g->nPlayers; p++) {
+        if (p == g->defender || g->handN[p] == 0 || (p == 0 && !g->autoHuman) || g->diff[p] == DIFF_EASY) continue;
+        int ci = g_bot_pick(g, p, 0, -1);
+        if (ci >= 0 && !(g->hands[p][ci].suit == g->trump && g->deckN > 0)) return true;
     }
     return false;
 }
@@ -456,6 +508,7 @@ static bool g_bot_throw_in(Game *g) {              // podkidnoy: a bystander bot
 static void g_bot_step(Game *g) {
     if (g->over != GO_NONE) return;
     if (!g_state_ok(g)) { g_repair(g); return; }
+    if (g_bot_throw_during_defense(g)) return;
     int p = g->active;
     if (p == 0 && !g->autoHuman) return;
 

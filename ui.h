@@ -213,6 +213,8 @@ typedef struct {
     bool dirtyTop, dirtyBot;       // each screen is redrawn only when its own content changed
     int lastX, lastY;
     int stickyTimer, lastCaught;   // keeps the "caught cheating" message on screen for ~3 s
+    bool padActive;                // the buttons were used last (a stylus touch switches this off)
+    int focus, kbSel;              // menu focus / selected card when playing with the buttons
 } UI;
 
 #define UI_MARK_ALL(u) do { (u)->dirtyTop = true; (u)->dirtyBot = true; } while (0)
@@ -229,7 +231,7 @@ static void ui_init(UI *u) {
 
 static void ui_start_game(UI *u, uint32_t seed) {
     g_init(&u->g, u->mode, u->bots, u->cheat, seed);
-    u->scr = UI_GAME; u->hover = ID_NONE; u->botTimer = 0; u->skipKey = -1; u->stickyTimer = 0; u->lastCaught = 0; UI_MARK_ALL(u);
+    u->scr = UI_GAME; u->hover = ID_NONE; u->botTimer = 0; u->skipKey = -1; u->stickyTimer = 0; u->lastCaught = 0; u->focus = 0; u->kbSel = 3; UI_MARK_ALL(u);
 }
 
 static int ui_min_bots(const UI *u) { return u->mode == GM_PEREVODNOY ? 2 : 1; }
@@ -351,6 +353,7 @@ static void ui_activate(UI *u, int id, uint32_t seed) {
 // touch: 0 = none, 1 = pressed, 2 = held, 3 = released. Call once per frame.
 static void ui_update(UI *u, int touch, int x, int y, bool startPressed, uint32_t seed) {
     if (touch == 1 || touch == 2) {
+        u->padActive = false;                                              // last used control wins
         u->lastX = x; u->lastY = y;
         int h = ui_hit(u, x, y);
         if (h != u->hover) { u->hover = h; u->dirtyBot = true; }        // hover only changes the touch screen
@@ -367,11 +370,88 @@ static void ui_update(UI *u, int touch, int x, int y, bool startPressed, uint32_
         if (!g_state_ok(g)) { g_repair(g); UI_MARK_ALL(u); }              // safety net, never expected to run
         if (g->stat_caught != u->lastCaught) { u->lastCaught = g->stat_caught; u->stickyTimer = 180; UI_MARK_ALL(u); }
         if (u->stickyTimer > 0 && --u->stickyTimer == 0) UI_MARK_ALL(u);
-        bool botActs = g->over == GO_NONE && (g->active != 0 || g->autoHuman) && !ui_throw_window(u);
+        bool botActs = g->over == GO_NONE && (g->active != 0 || g->autoHuman || g_bot_may_throw(g)) && !ui_throw_window(u);
         if (botActs) {
             if (++u->botTimer >= BOT_DELAY_FRAMES) { g_bot_step(g); u->botTimer = 0; UI_MARK_ALL(u); }
         } else u->botTimer = 0;
+        if (u->padActive && touch == 0) {                                   // buttons: keep the lifted card in step with the hand
+            int n = g->handN[0], want = (g->over == GO_NONE && n > 0) ? (u->kbSel < n ? u->kbSel : n - 1) : ID_NONE;
+            if (want >= 0) u->kbSel = want;
+            if (u->hover != want) { u->hover = want; u->dirtyBot = true; }
+        }
     }
+}
+
+/* ----------------------------------------------------------- buttons */
+
+#define PAD_LEFT  1
+#define PAD_RIGHT 2
+#define PAD_UP    4
+#define PAD_DOWN  8
+#define PAD_A     16
+#define PAD_B     32
+#define PAD_X     64
+#define PAD_Y     128
+
+static int ui_focus_id(const UI *u) {
+    if (u->scr == UI_MODE) return ID_MODE0 + u->focus;
+    int mn = ui_min_bots(u), k = 4 - mn;
+    if (u->focus < k) return ID_BOTS1 + (mn + u->focus - 1);
+    return u->focus == k ? ID_CHEAT : ID_BACK;
+}
+
+// Buttons work next to the stylus. The first direction press only shows the selection (same look as a touched
+// card or column); after that: left/right move, A confirms/plays, B take (back in menus), Y pass, X skip a throw-in.
+static void ui_pad(UI *u, int keys, uint32_t seed) {
+    if (!keys) return;
+    bool was = u->padActive;
+    int prev = u->scr;
+    u->padActive = true;
+    u->dirtyBot = true;
+
+    if (u->scr == UI_MODE) {
+        if (was) {
+            if ((keys & PAD_LEFT) && u->focus > 0) u->focus--;
+            if ((keys & PAD_RIGHT) && u->focus < 2) u->focus++;
+            if (keys & PAD_A) ui_activate(u, ID_MODE0 + u->focus, seed);
+        }
+    } else if (u->scr == UI_BOTS) {
+        int mn = ui_min_bots(u), k = 4 - mn;
+        if (keys & PAD_B) ui_activate(u, ID_BACK, seed);
+        else if (was) {
+            if ((keys & PAD_LEFT) && u->focus > 0 && u->focus < k) u->focus--;
+            if ((keys & PAD_RIGHT) && u->focus < k - 1) u->focus++;
+            if (keys & PAD_DOWN) { if (u->focus < k) u->focus = k; else if (u->focus == k) u->focus = k + 1; }
+            if (keys & PAD_UP)   { if (u->focus == k + 1) u->focus = k; else if (u->focus == k) u->focus = k - 1; }
+            if (keys & PAD_A) ui_activate(u, ui_focus_id(u), seed);
+        }
+    } else {
+        Game *g = &u->g;
+        if (g->over != GO_NONE) {
+            if (keys & PAD_A) ui_activate(u, ID_AGAIN, seed);
+            else if (keys & PAD_B) ui_activate(u, ID_MENU, seed);
+        } else {
+            int n = g->handN[0];
+            if (was && n > 0) {
+                if ((keys & PAD_LEFT) && u->kbSel > 0) u->kbSel--;
+                if ((keys & PAD_RIGHT) && u->kbSel < n - 1) u->kbSel++;
+                if (keys & PAD_A) ui_activate(u, u->kbSel < n ? u->kbSel : n - 1, seed);
+            }
+            if (keys & PAD_B) ui_activate(u, ID_TAKE, seed);
+            if (keys & PAD_Y) ui_activate(u, ID_PASS, seed);
+            if ((keys & PAD_X) && ui_throw_window(u)) ui_activate(u, ID_SKIP, seed);
+        }
+    }
+
+    if (u->scr != prev) u->focus = 0;                                       // a new screen starts at its first item
+    if (u->scr == UI_MODE) u->hover = ID_MODE0 + u->focus;
+    else if (u->scr == UI_BOTS) u->hover = ui_focus_id(u);
+    else {
+        int n = u->g.handN[0];
+        if (n > 0 && u->kbSel >= n) u->kbSel = n - 1;
+        u->hover = (u->g.over == GO_NONE && n > 0) ? u->kbSel : ID_NONE;
+    }
+    UI_MARK_ALL(u);
 }
 
 /* ------------------------------------------------------------- rendering */
